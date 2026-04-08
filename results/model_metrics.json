@@ -1,7 +1,9 @@
 {
   "auroc": 0.8752994819394955,
   "brier": 0.11295466224385528,
-  "confidence_threshold_tau": 0.7888874116436786,
+  "confidence_threshold_tau": 0.7888874116436783,
   "n_train": 84000,
-  "n_test": 36000
+  "n_test": 36000,
+  "simulation_timestep_multiplier": 5,
+  "n_simulation_steps": 180000
 }

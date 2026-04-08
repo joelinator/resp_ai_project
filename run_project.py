@@ -43,13 +43,28 @@ LOG_PATH = RESULTS_DIR / "run.log"
 GDRIVE_FILE_ID = "1NNXHFRxcArrU0ZJSb9BIL56vmUt5FhlE"
 SEED = 42
 
-#deployment-cost logic:
-# Action A (AI):          loss in [0,1] + cost 0.0
-# Action B (Human):       loss in [0,1] + cost 0.8
-# Action C (Diagnostic):  loss in [0,1] + cost 0.4
+# Reframed educational-support cost logic:
+# Decision loss:
+# - If judged fit and student fails: loss = 1.0
+# - If judged not fit (no assignment): imputed opportunity loss = 0.4
+# Deployment costs:
+# - Action A (AI): cost 0.0
+# - Action B (Human): cost 0.9
+# - Action C (Diagnostic): cost 0.5
+OPPORTUNITY_LOSS_NOT_FIT = 0.4
 DEPLOYMENT_COST_AI = 0.0
-DEPLOYMENT_COST_HUMAN = 0.8
-DEPLOYMENT_COST_DIAGNOSTIC = 0.4
+DEPLOYMENT_COST_HUMAN = 0.9
+DEPLOYMENT_COST_DIAGNOSTIC = 0.5
+
+
+def set_results_dir(results_dir: str) -> None:
+    """Set output directory globally so all artifacts are redirected."""
+    global RESULTS_DIR, LOG_PATH
+    candidate = Path(results_dir)
+    if not candidate.is_absolute():
+        candidate = ROOT / candidate
+    RESULTS_DIR = candidate.resolve()
+    LOG_PATH = RESULTS_DIR / "run.log"
 
 
 @dataclass
@@ -104,6 +119,7 @@ def configure_logging() -> None:
         level=logging.INFO,
         format="%(asctime)s | %(levelname)s | %(message)s",
         handlers=[logging.FileHandler(LOG_PATH), logging.StreamHandler()],
+        force=True,
     )
 
 
@@ -274,8 +290,16 @@ def simulate_action_outcomes(
     skill_id: np.ndarray,
 ) -> ActionOutcomes:
     rng = np.random.default_rng(SEED)
+    # Reframed task: each decision-maker judges "fit" (1) vs "not fit" (0).
+    # We map observed success label as proxy for latent fit status.
+    true_fit = y_true.astype(np.int64)
+
     ai_pred = (p_correct >= 0.5).astype(np.int64)
-    ai_loss = (ai_pred != y_true).astype(float)
+    ai_loss = np.where(
+        ai_pred == 1,
+        (1 - y_true).astype(float),  # overconfidence penalty if assigned and student fails
+        OPPORTUNITY_LOSS_NOT_FIT,  # imputed opportunity loss when not assigning
+    )
 
     skill_codes, _ = pd.factorize(pd.Series(skill_id).astype(str), sort=True)
     hard_skill_penalty = np.where(skill_codes % 7 == 0, -0.08, 0.0)
@@ -286,15 +310,22 @@ def simulate_action_outcomes(
         0.98,
     )
     human_correct = rng.binomial(1, human_accuracy).astype(np.int64)
-    human_pred = np.where(human_correct == 1, y_true, 1 - y_true).astype(np.int64)
-    human_loss = (human_pred != y_true).astype(float)
+    human_pred = np.where(human_correct == 1, true_fit, 1 - true_fit).astype(np.int64)
+    human_loss = np.where(
+        human_pred == 1,
+        (1 - y_true).astype(float),
+        OPPORTUNITY_LOSS_NOT_FIT,
+    )
 
     ai_conf = np.maximum(p_correct, 1.0 - p_correct)
     diagnostic_accuracy = np.clip(0.66 + 0.20 * ai_conf + 0.10 * human_accuracy, 0.70, 0.99)
     diagnostic_correct = rng.binomial(1, diagnostic_accuracy).astype(np.int64)
-    diagnostic_pred = np.where(diagnostic_correct == 1, y_true, 1 - y_true).astype(np.int64)
-    # Loss is 1.0 iff student outcome is wrong, otherwise 0.0.
-    diagnostic_loss = (diagnostic_pred != y_true).astype(float)
+    diagnostic_pred = np.where(diagnostic_correct == 1, true_fit, 1 - true_fit).astype(np.int64)
+    diagnostic_loss = np.where(
+        diagnostic_pred == 1,
+        (1 - y_true).astype(float),
+        OPPORTUNITY_LOSS_NOT_FIT,
+    )
 
     # Total expected cost = wrong-answer loss + action deployment cost.
     ai_total_cost = ai_loss + DEPLOYMENT_COST_AI
@@ -315,15 +346,21 @@ def simulate_action_outcomes(
     )
 
 
-def compute_fairness_rates(y_true: np.ndarray, y_pred: np.ndarray, group: np.ndarray) -> Dict[str, float]:
+def compute_fairness_rates(y_true: np.ndarray, decision_fit: np.ndarray, group: np.ndarray) -> Dict[str, float]:
     def safe_rate(num: float, den: float) -> float:
         return float(num / den) if den > 0 else 0.0
+
+    # Harm-oriented fairness on proficiency judgment:
+    # positives = students who need support (not proficient, y=0),
+    # predicted positive = system judges "needs support" (decision_fit=0).
+    need_support = (y_true == 0).astype(np.int64)
+    predicted_support = (decision_fit == 0).astype(np.int64)
 
     out: Dict[str, float] = {}
     for g in [0, 1]:
         mask = group == g
-        yt = y_true[mask]
-        yp = y_pred[mask]
+        yt = need_support[mask]
+        yp = predicted_support[mask]
         tp = float(np.sum((yt == 1) & (yp == 1)))
         fn = float(np.sum((yt == 1) & (yp == 0)))
         fp = float(np.sum((yt == 0) & (yp == 1)))
@@ -357,7 +394,7 @@ def summarize_policy(logs: pd.DataFrame) -> Dict[str, float]:
         "diagnostic_rate": float((logs["action"] == "DIAGNOSTIC").mean()),
         "average_loss": float(logs["loss"].mean()),
         "average_total_cost": float(logs["total_cost"].mean()),
-        "accuracy": float((logs["y_true"] == logs["y_pred"]).mean()),
+        "accuracy": float((y_true == y_pred).mean()),  # judgment fit/not-fit accuracy proxy
         "teacher_workload": float((logs["action"] == "HUMAN").mean()),
         "demographic_parity_escalation_diff": abs(escalation_male - escalation_female),
         "risk_gap": abs(risk_male - risk_female),
@@ -372,20 +409,33 @@ def run_baseline_policy(
     y_true: np.ndarray,
     gender: np.ndarray,
     outcomes: ActionOutcomes,
+    sequence_idx: np.ndarray,
+    simulation_timestep_multiplier: int = 1,
 ) -> pd.DataFrame:
     action = np.where(confidence >= threshold, "AI", "HUMAN")
     y_pred = np.where(action == "AI", outcomes.ai_pred, outcomes.human_pred)
     loss = np.where(action == "AI", outcomes.ai_loss, outcomes.human_loss)
     total_cost = np.where(action == "AI", outcomes.ai_total_cost, outcomes.human_total_cost)
+
+    base_order = np.argsort(sequence_idx)
+    if simulation_timestep_multiplier > 1:
+        sim_order = np.tile(base_order, int(simulation_timestep_multiplier))
+    else:
+        sim_order = base_order
+
     df = pd.DataFrame(
         {
-            "action": action,
-            "y_true": y_true,
-            "y_pred": y_pred,
-            "gender": gender,
-            "loss": loss,
-            "total_cost": total_cost,
-            "confidence": confidence,
+            "action": action[sim_order],
+            "y_true": y_true[sim_order],  # observed success label if exercise assigned
+            "y_pred": y_pred[sim_order],  # judged fit/not-fit decision
+            "true_fit": y_true[sim_order],
+            "decision_fit": y_pred[sim_order],
+            "gender": gender[sim_order],
+            "loss": loss[sim_order],
+            "total_cost": total_cost[sim_order],
+            "confidence": confidence[sim_order],
+            "step": np.arange(1, len(sim_order) + 1, dtype=np.int64),
+            "source_idx": sim_order.astype(np.int64),
         }
     )
     return df
@@ -432,12 +482,17 @@ def run_proposed_policy(
     outcomes: ActionOutcomes,
     alpha: float = 0.7,
     guardrail_batch: int = 500,
+    simulation_timestep_multiplier: int = 1,
 ) -> Tuple[pd.DataFrame, pd.DataFrame]:
     context = make_bandit_context(test_df, p_correct=test_df["p_correct"].to_numpy(), confidence=confidence)
     bandit = LinUCB(n_actions=3, d=context.shape[1], alpha=alpha, reg=1.0)
     action_names = ["AI", "HUMAN", "DIAGNOSTIC"]
 
-    order = np.argsort(test_df["sequence_idx"].to_numpy())
+    base_order = np.argsort(test_df["sequence_idx"].to_numpy())
+    if simulation_timestep_multiplier > 1:
+        order = np.tile(base_order, int(simulation_timestep_multiplier))
+    else:
+        order = base_order
     penalties = {0: 0.0, 1: 0.0}
     logs = []
     guardrail_rows = []
@@ -456,11 +511,14 @@ def run_proposed_policy(
                 "action": action_name,
                 "y_true": int(y_true[idx]),
                 "y_pred": int(pred_arr[idx]),
+                "true_fit": int(y_true[idx]),
+                "decision_fit": int(pred_arr[idx]),
                 "gender": g,
                 "loss": float(loss_arr[idx]),
                 "total_cost": float(total_arr[idx]),
                 "confidence": float(confidence[idx]),
                 "step": int(t + 1),
+                "source_idx": int(idx),
                 "ai_penalty_gender0": penalties[0],
                 "ai_penalty_gender1": penalties[1],
             }
@@ -643,10 +701,21 @@ def copy_neurips_assets() -> None:
         shutil.copy2(checklist_src, checklist_dst)
 
 
-def run_pipeline(max_interactions: int, max_raw_rows: int | None) -> None:
+def run_pipeline(
+    max_interactions: int,
+    max_raw_rows: int | None,
+    simulation_timestep_multiplier: int,
+    results_dir: str,
+) -> None:
+    if simulation_timestep_multiplier < 1:
+        raise ValueError("simulation_timestep_multiplier must be >= 1")
+
+    set_results_dir(results_dir)
     configure_logging()
     ensure_dirs()
     logging.info("Starting pipeline...")
+    logging.info("Results directory: %s", RESULTS_DIR)
+    logging.info("Simulation timestep multiplier: x%d", simulation_timestep_multiplier)
 
     raw_df = load_raw_data(max_rows=max_raw_rows)
     df = preprocess_data(raw_df, max_interactions=max_interactions)
@@ -703,6 +772,8 @@ def run_pipeline(max_interactions: int, max_raw_rows: int | None) -> None:
         "confidence_threshold_tau": tau,
         "n_train": int(len(X_train)),
         "n_test": int(len(X_test)),
+        "simulation_timestep_multiplier": int(simulation_timestep_multiplier),
+        "n_simulation_steps": int(len(X_test) * simulation_timestep_multiplier),
     }
 
     outcomes = simulate_action_outcomes(
@@ -718,6 +789,8 @@ def run_pipeline(max_interactions: int, max_raw_rows: int | None) -> None:
         y_true=y_test,
         gender=test_df["gender"].to_numpy(dtype=np.int64),
         outcomes=outcomes,
+        sequence_idx=test_df["sequence_idx"].to_numpy(dtype=float),
+        simulation_timestep_multiplier=simulation_timestep_multiplier,
     )
 
     test_df = test_df.copy()
@@ -729,17 +802,27 @@ def run_pipeline(max_interactions: int, max_raw_rows: int | None) -> None:
         outcomes=outcomes,
         alpha=0.7,
         guardrail_batch=500,
+        simulation_timestep_multiplier=simulation_timestep_multiplier,
     )
 
     baseline_summary = summarize_policy(baseline_logs)
     proposed_summary = summarize_policy(proposed_logs)
 
+    sim_order = np.argsort(test_df["sequence_idx"].to_numpy())
+    if simulation_timestep_multiplier > 1:
+        sim_order = np.tile(sim_order, int(simulation_timestep_multiplier))
+    conf_sim = conf_test[sim_order]
+    ai_loss_sim = outcomes.ai_loss[sim_order]
+    human_loss_sim = outcomes.human_loss[sim_order]
+    diagnostic_loss_sim = outcomes.diagnostic_loss[sim_order]
+    gender_sim = test_df["gender"].to_numpy()[sim_order]
+
     coverages = np.linspace(0.10, 1.00, 19)
-    baseline_curve = selective_risk_curve(conf_test, outcomes.ai_loss, outcomes.human_loss, coverages)
+    baseline_curve = selective_risk_curve(conf_sim, ai_loss_sim, human_loss_sim, coverages)
     proposed_curve = selective_risk_curve(
-        conf_test,
-        outcomes.ai_loss,
-        np.minimum(outcomes.human_loss, outcomes.diagnostic_loss),
+        conf_sim,
+        ai_loss_sim,
+        np.minimum(human_loss_sim, diagnostic_loss_sim),
         coverages,
     )
 
@@ -752,31 +835,31 @@ def run_pipeline(max_interactions: int, max_raw_rows: int | None) -> None:
         title="Risk-Coverage Curves (Overall)",
     )
 
-    male_mask = test_df["gender"].to_numpy() == 0
-    female_mask = test_df["gender"].to_numpy() == 1
+    male_mask = gender_sim == 0
+    female_mask = gender_sim == 1
 
     male_baseline_curve = selective_risk_curve(
-        conf_test[male_mask],
-        outcomes.ai_loss[male_mask],
-        outcomes.human_loss[male_mask],
+        conf_sim[male_mask],
+        ai_loss_sim[male_mask],
+        human_loss_sim[male_mask],
         coverages,
     )
     male_proposed_curve = selective_risk_curve(
-        conf_test[male_mask],
-        outcomes.ai_loss[male_mask],
-        np.minimum(outcomes.human_loss[male_mask], outcomes.diagnostic_loss[male_mask]),
+        conf_sim[male_mask],
+        ai_loss_sim[male_mask],
+        np.minimum(human_loss_sim[male_mask], diagnostic_loss_sim[male_mask]),
         coverages,
     )
     female_baseline_curve = selective_risk_curve(
-        conf_test[female_mask],
-        outcomes.ai_loss[female_mask],
-        outcomes.human_loss[female_mask],
+        conf_sim[female_mask],
+        ai_loss_sim[female_mask],
+        human_loss_sim[female_mask],
         coverages,
     )
     female_proposed_curve = selective_risk_curve(
-        conf_test[female_mask],
-        outcomes.ai_loss[female_mask],
-        np.minimum(outcomes.human_loss[female_mask], outcomes.diagnostic_loss[female_mask]),
+        conf_sim[female_mask],
+        ai_loss_sim[female_mask],
+        np.minimum(human_loss_sim[female_mask], diagnostic_loss_sim[female_mask]),
         coverages,
     )
 
@@ -784,12 +867,12 @@ def run_pipeline(max_interactions: int, max_raw_rows: int | None) -> None:
         baseline_curve=male_baseline_curve,
         proposed_curve=male_proposed_curve,
         baseline_point=(
-            float((baseline_logs.loc[male_mask, "action"] == "AI").mean()),
-            float(baseline_logs.loc[male_mask, "loss"].mean()),
+            float((baseline_logs.loc[baseline_logs["gender"] == 0, "action"] == "AI").mean()),
+            float(baseline_logs.loc[baseline_logs["gender"] == 0, "loss"].mean()),
         ),
         proposed_point=(
-            float((proposed_logs.loc[male_mask, "action"] == "AI").mean()),
-            float(proposed_logs.loc[male_mask, "loss"].mean()),
+            float((proposed_logs.loc[proposed_logs["gender"] == 0, "action"] == "AI").mean()),
+            float(proposed_logs.loc[proposed_logs["gender"] == 0, "loss"].mean()),
         ),
         save_path=RESULTS_DIR / "risk_coverage_male.png",
         title="Risk-Coverage Curves (Male students)",
@@ -799,12 +882,12 @@ def run_pipeline(max_interactions: int, max_raw_rows: int | None) -> None:
         baseline_curve=female_baseline_curve,
         proposed_curve=female_proposed_curve,
         baseline_point=(
-            float((baseline_logs.loc[female_mask, "action"] == "AI").mean()),
-            float(baseline_logs.loc[female_mask, "loss"].mean()),
+            float((baseline_logs.loc[baseline_logs["gender"] == 1, "action"] == "AI").mean()),
+            float(baseline_logs.loc[baseline_logs["gender"] == 1, "loss"].mean()),
         ),
         proposed_point=(
-            float((proposed_logs.loc[female_mask, "action"] == "AI").mean()),
-            float(proposed_logs.loc[female_mask, "loss"].mean()),
+            float((proposed_logs.loc[proposed_logs["gender"] == 1, "action"] == "AI").mean()),
+            float(proposed_logs.loc[proposed_logs["gender"] == 1, "loss"].mean()),
         ),
         save_path=RESULTS_DIR / "risk_coverage_female.png",
         title="Risk-Coverage Curves (Female students)",
@@ -871,9 +954,26 @@ def parse_args() -> argparse.Namespace:
         default=None,
         help="Optional cap when first reading raw CSV.",
     )
+    parser.add_argument(
+        "--simulation-timestep-multiplier",
+        type=int,
+        default=1,
+        help="Repeat test-stream simulation by this factor (e.g. 5 = 5x timesteps).",
+    )
+    parser.add_argument(
+        "--results-dir",
+        type=str,
+        default="results",
+        help="Output directory for run artifacts.",
+    )
     return parser.parse_args()
 
 
 if __name__ == "__main__":
     args = parse_args()
-    run_pipeline(max_interactions=args.max_interactions, max_raw_rows=args.max_raw_rows)
+    run_pipeline(
+        max_interactions=args.max_interactions,
+        max_raw_rows=args.max_raw_rows,
+        simulation_timestep_multiplier=args.simulation_timestep_multiplier,
+        results_dir=args.results_dir,
+    )

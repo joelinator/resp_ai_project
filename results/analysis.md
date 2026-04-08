@@ -1,12 +1,12 @@
 # Experimental Analysis
 
-- Proposed policy average total cost: 0.1514
-- Baseline average total cost: 0.2798
-- Cost reduction: 0.1285 (45.91%)
-- Proposed coverage: 0.990, escalation: 0.001, diagnostic: 0.009
+- Proposed policy average total cost: 0.2221
+- Baseline average total cost: 0.3837
+- Cost reduction: 0.1616 (42.12%)
+- Proposed coverage: 0.999, escalation: 0.000, diagnostic: 0.001
 - Baseline coverage: 0.798, escalation: 0.202
-- Proposed Delta EO (FNR): 0.0021
-- Baseline Delta EO (FNR): 0.0434
+- Proposed Delta EO (FNR): 0.0035
+- Baseline Delta EO (FNR): 0.0554
 
 Interpretation:
 The adaptive routing policy learns when to allocate human effort under cost constraints while

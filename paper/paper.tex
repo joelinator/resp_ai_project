@@ -27,17 +27,17 @@
 \maketitle
 
 \begin{abstract}
-This project studies cost-sensitive collaboration for educational recommendation by wrapping a calibrated knowledge tracing (KT) model in routing policies that decide whether the AI answers, escalates to a teacher, or requests a short diagnostic quiz. Using ASSISTments 2009--2010 interactions with a reproducible synthetic gender attribute, we compare a confidence-threshold baseline to an online LinUCB policy with a fairness guardrail based on Equal Opportunity (EO) gap control. Under the updated deployment cost regime, the adaptive policy reduces average deployment cost from 0.280 to 0.151 per interaction (\SI{45.9}{\percent} reduction) and reduces gender EO gap (FNR difference) from 0.0436 to 0.0021, while increasing autonomous coverage from 79.8\% to 99.0\%. The main trade-off is a higher task loss (0.118 to 0.147), showing that optimizing deployment utility and fairness can diverge from pure predictive accuracy. We also provide SHAP-based local and global explanations to make escalation decisions auditable.
+This project studies cost-sensitive collaboration for educational recommendation, where the primary objective is to identify whether each student is proficient on a target skill (needs support or not) and route the case accordingly. We wrap a calibrated knowledge tracing (KT) model in routing policies that decide whether the AI answers, escalates to a teacher, or requests a short diagnostic quiz. Using ASSISTments 2009--2010 interactions with a reproducible synthetic gender attribute, we compare a confidence-threshold baseline to an online LinUCB policy with a fairness guardrail based on Equal Opportunity (EO) gap control. Under the corrected proficiency-based false-negative definition and a 5x simulation stream, the adaptive policy reduces average deployment cost from 0.384 to 0.222 per interaction (\SI{42.1}{\percent} reduction) and reduces gender EO gap (FNR difference) from 0.0554 to 0.0035, while increasing autonomous coverage from 79.8\% to 99.89\%. The main trade-off is a higher task loss (0.202 to 0.222), showing that optimizing deployment utility and fairness can diverge from pure predictive accuracy. We also provide SHAP-based local and global explanations to audit decision rationale.
 \end{abstract}
 
 \section{Problem formulation and motivation}
-We study \textbf{personalized exercise recommendation} as a sequential decision problem in educational technology. At each student interaction, the system must decide not only a prediction, but the \emph{workflow action}: let the AI decide directly, defer to a human teacher, or request a short diagnostic step before deciding. This matters in practice for three reasons: (i) wrong recommendations can slow learning progression, (ii) teacher time is scarce and expensive, and (iii) repeated routing decisions can amplify subgroup disparities if left unconstrained \citep{friedman1996bias,khan2022substantive}.
+We study \textbf{personalized exercise recommendation} as a sequential decision problem in educational technology. At each student interaction, the system first needs a proficiency judgment (student is fit for the skill vs needs support), then must choose the \emph{workflow action}: let the AI decide directly, defer to a human teacher, or request a short diagnostic step before deciding. This matters in practice for three reasons: (i) wrong proficiency judgments can slow learning progression, (ii) teacher time is scarce and expensive, and (iii) repeated routing decisions can amplify subgroup disparities if left unconstrained \citep{friedman1996bias,khan2022substantive}.
 
 For context $x_t$ at step $t$, with action set $\mathcal{A}=\{A,B,C\}$ (AI, Human, Diagnostic), the routing objective is
 \[
 \pi^\*(x_t)=\arg\min_{a\in\mathcal{A}} \; \mathbb{E}\!\left[\ell_t(a)\mid x_t\right] + c(a),
 \]
-where $\ell_t(a)\in\{0,1\}$ is wrong-answer loss and $c(a)$ is deployment cost.
+where \(\ell_t(a)\) is action-dependent educational loss and \(c(a)\) is deployment cost.
 We evaluate:
 \begin{itemize}
 \item \textbf{Baseline:} confidence-threshold routing between AI and Human.
@@ -50,8 +50,8 @@ We use ASSISTments 2009--2010 Skill Builder interactions \citep{assistments2009}
 
 The operational task is: for each new interaction, choose one of three actions:
 \begin{itemize}
-\item \(A\): AI answers directly,
-\item \(B\): escalate to human teacher,
+\item \(A\): AI makes an autonomous fit/not-fit recommendation for the target skill,
+\item \(B\): escalate fit/not-fit recommendation to a human teacher,
 \item \(C\): request a diagnostic micro-quiz.
 \end{itemize}
 To audit group behavior, we add a deterministic synthetic gender attribute at user level (balanced by user index parity), used only for fairness monitoring.
@@ -92,7 +92,15 @@ p_d(t)=\mathrm{clip}\!\left(0.66 + 0.20q_t + 0.10p_h(t),\;0.70,\;0.99\right),
 \]
 then samples correctness from \(p_d(t)\).
 
-Action costs are \(c(A)=0.0\), \(c(B)=0.8\), \(c(C)=0.4\), with binary wrong-answer loss \(\ell_t\in\{0,1\}\).
+Loss is defined from fit/not-fit judgments:
+\[
+\ell_t(a)=
+\begin{cases}
+1-y_t, & \text{if judged fit (exercise assigned)}\\
+0.4, & \text{if judged not fit (opportunity loss)}
+\end{cases}
+\]
+with deployment costs \(c(A)=0.0\), \(c(B)=0.9\), and \(c(C)=0.5\).
 
 \section{Policies}
 \subsection{Baseline}
@@ -122,7 +130,7 @@ For fairness control, every 500 interactions we compute EO disparity
 \[
 \Delta_{\text{EO}} = |\mathrm{FNR}_{\text{male}} - \mathrm{FNR}_{\text{female}}|.
 \]
-If \(\Delta_{\text{EO}} > 0.05\), we increment \(\lambda_t(g)\) for the disadvantaged group by 0.05 (capped), reducing over-confident AI autonomy for that group.
+Here FNR is defined on students needing support (\(y_t=0\)): a false negative means the system judges \emph{fit} for the skill (\(\hat y_t=1\)) when the student is actually not proficient (\(y_t=0\)). This definition is action-agnostic and therefore applies equally to AI, human, and diagnostic decisions. If \(\Delta_{\text{EO}} > 0.05\), we increment \(\lambda_t(g)\) for the disadvantaged group by 0.05 (capped), reducing over-confident AI autonomy for that group.
 
 \begin{figure}[t]
     \centering
@@ -134,18 +142,18 @@ If \(\Delta_{\text{EO}} > 0.05\), we increment \(\lambda_t(g)\) for the disadvan
 \end{figure}
 
 \section{Results}
-Table~\ref{tab:main} shows the central deployment results. The adaptive policy substantially lowers total cost and teacher workload, while sharply reducing fairness disparity. However, it increases task loss, highlighting the optimization tension between utility/cost and raw correctness.
+Table~\ref{tab:main} shows the central deployment results. The adaptive policy substantially lowers deployment cost and closes the \emph{between-group} EO gap, but it also pushes escalation rates close to zero and increases task loss. This highlights the distinction between reducing disparity and providing sufficient absolute support coverage.
 
 \begin{table}[t]
 \centering
-\caption{Main policy outcomes on the 36{,}000-example test stream.}
+\caption{Main policy outcomes on a 180{,}000-step simulation stream (5x repeated test timeline).}
 \label{tab:main}
 \begin{tabular}{lcccccc}
 \toprule
 Policy & AI cov. & Escal. & Diag. & Avg loss & Avg total cost & $\Delta_{\text{EO}}$ \\
 \midrule
-Baseline & 0.798 & 0.202 & 0.000 & 0.118 & 0.280 & 0.0436 \\
-Proposed & 0.990 & 0.0012 & 0.0086 & 0.147 & 0.151 & 0.0021 \\
+Baseline & 0.798 & 0.202 & 0.000 & 0.202 & 0.384 & 0.0554 \\
+Proposed & 0.9989 & 0.00009 & 0.0010 & 0.222 & 0.222 & 0.0035 \\
 \bottomrule
 \end{tabular}
 \end{table}
@@ -154,22 +162,22 @@ Figure~\ref{fig:policyflow} summarizes the policy logic, Figure~\ref{fig:overall
 
 \begin{figure}[t]
     \centering
-    \includegraphics[width=0.95\linewidth]{../results/risk_coverage_overall.png}
+    \includegraphics[width=0.95\linewidth]{../results_reframed_proficiency_5x/risk_coverage_overall.png}
     \caption{Overall risk--coverage curves. The adaptive policy operates at much higher AI coverage, reducing cost but with higher task loss.}
     \label{fig:overall}
 \end{figure}
 
 \begin{figure}[t]
     \centering
-    \includegraphics[width=0.49\linewidth]{../results/shap_global_importance.png}
-    \includegraphics[width=0.49\linewidth]{../results/shap_local_case.png}
+    \includegraphics[width=0.49\linewidth]{../results_reframed_proficiency_5x/shap_global_importance.png}
+    \includegraphics[width=0.49\linewidth]{../results_reframed_proficiency_5x/shap_local_case.png}
     \caption{Transparency outputs: global SHAP importance (left) and local explanation for one escalated case (right).}
     \label{fig:transparency}
 \end{figure}
 
 \paragraph{Fairness.}
 Compared with baseline, the proposed policy improves all tracked group fairness statistics:
-EO gap (0.0436 \(\rightarrow\) 0.0021), equalized-odds difference (0.0554 \(\rightarrow\) 0.0021), and risk gap (0.0477 \(\rightarrow\) 0.0010). Intuitively, avoiding biased human escalation in this simulator shrinks subgroup disparity.
+EO gap (0.0554 \(\rightarrow\) 0.0035), equalized-odds difference (0.0554 \(\rightarrow\) 0.0035), and risk gap (0.0230 \(\rightarrow\) 0.00028) all improve. However, absolute FNR increases under the proposed policy (fewer false-negative disparities but more missed support overall), so parity improves more than absolute support quality.
 
 \paragraph{Transparency.}
 Global explanations indicate the strongest drivers are \texttt{attempt\_count}, rolling skill correctness, and recency, with skill-specific indicators contributing to finer adjustments. Local explanations for escalated cases expose why confidence was insufficient for autonomous action, supporting teacher oversight and accountability through SHAP-style additive attributions \citep{lundberg2017shap}.
@@ -177,13 +185,13 @@ Global explanations indicate the strongest drivers are \texttt{attempt\_count}, 
 \section{Discussion and limitations}
 The key empirical insight is that deployment-aware routing can deliver large operational gains even when predictive risk worsens. In other words, optimizing end-to-end decision utility is not equivalent to optimizing classifier accuracy alone.
 
-Limitations are important. First, human behavior is simulated; true classroom studies could produce different trade-offs. Second, gender is synthetic and used for methodological benchmarking, not sociological claims. Third, we evaluate one dataset and one model family; generalization to other subjects and cohorts remains open. Finally, because the guardrail threshold was not exceeded online, this run demonstrates \emph{guardrail readiness} more than active intervention.
+Limitations are important. First, human behavior is simulated; true classroom studies could produce different trade-offs. Second, gender is synthetic and used for methodological benchmarking, not sociological claims. Third, we evaluate one dataset and one model family; generalization to other subjects and cohorts remains open. Fourth, EO-gap control alone does not guarantee low harm for all students: in this run, subgroup parity improves but absolute false-negative rates remain high.
 
 \section{Conclusion}
 We implemented an end-to-end, reproducible human--AI collaboration pipeline for educational recommendation that integrates calibrated uncertainty, online routing, fairness monitoring, and transparency artifacts. Relative to a strong threshold baseline, the adaptive policy yields much lower deployment cost and stronger group fairness, while exposing a clear accuracy-cost-fairness trade-off that is central to responsible human--AI system design.
 
 \section*{Reproducibility}
-All artifacts (CSV logs, fairness tables, SHAP figures, and risk--coverage plots) are automatically generated by a single script (\texttt{run\_project.py}) and saved under \texttt{results/}. The run was executed on CPU in a Python virtual environment, using fixed random seed 42.
+All artifacts (CSV logs, fairness tables, SHAP figures, and risk--coverage plots) are automatically generated by a single script (\texttt{run\_project.py}) and saved under \texttt{results\_reframed\_proficiency\_5x/} for this experiment. The run was executed on CPU in a Python virtual environment, using fixed random seed 42.
 
 \bibliographystyle{plainnat}
 \bibliography{references}
@@ -192,7 +200,7 @@ All artifacts (CSV logs, fairness tables, SHAP figures, and risk--coverage plots
 \section{Additional implementation details}
 The complete command used was:
 \begin{verbatim}
-/home/joelinator/env/bin/python run_project.py
+/home/joelinator/env/bin/python run_project.py --simulation-timestep-multiplier 5 --results-dir results_reframed_proficiency_5x
 \end{verbatim}
 The script downloads ASSISTments data if absent, preprocesses it into
 \texttt{data/assistments\_2009\_processed\_with\_gender.csv}, and then produces all metrics and figures.
