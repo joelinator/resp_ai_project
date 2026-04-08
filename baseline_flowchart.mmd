@@ -1,0 +1,37 @@
+flowchart TB
+    S([Start])
+    E([End])
+
+    subgraph TRAIN[Setup (offline)]
+        direction LR
+        D1[Load processed ASSISTments data]
+        D2[Build KT features]
+        D3[Train calibrated KT model]
+        T[Set threshold tau]
+        D1 --> D2 --> D3 --> T
+    end
+
+    subgraph LOOP[Online loop (per interaction)]
+        direction LR
+        X[Compute p(correct) + confidence]
+        Q{confidence >= tau?}
+        A[A: AI Answers]
+        B[B: Escalate to Human]
+        CA[Cost A = loss + 0.0]
+        CB[Cost B = loss + 0.8]
+        LA[loss = 1 if wrong else 0]
+        LB[loss = 1 if wrong else 0]
+        M[Log action/loss/cost/fairness]
+        N{More interactions?}
+
+        X --> Q
+        Q -- Yes --> A --> LA --> CA --> M
+        Q -- No --> B --> LB --> CB --> M
+        M --> N
+    end
+
+    OUT[Outputs:<br/>coverage, escalation rate,<br/>avg loss, avg total cost,<br/>Delta EO, Equalized Odds, risk gap]
+
+    S --> TRAIN --> X
+    N -- Yes --> X
+    N -- No --> OUT --> E

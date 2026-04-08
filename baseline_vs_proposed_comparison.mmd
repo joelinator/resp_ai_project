@@ -1,0 +1,40 @@
+flowchart TB
+    LOSS[Shared loss rule:<br/>loss = 1 if wrong, else 0]
+
+    subgraph BL[Baseline (stacked lane)]
+        direction LR
+        BL0[Input: calibrated confidence]
+        BL1{confidence >= tau?}
+        BL2[A: AI Answers]
+        BL3[B: Escalate to Human]
+        BL4[Cost model:<br/>A = loss + 0.0<br/>B = loss + 0.8]
+        BL5[No fairness adaptation]
+        BLS[Summary:<br/>coverage, escalation rate,<br/>average loss, average total cost,<br/>fairness metrics]
+
+        BL0 --> BL1
+        BL1 -- Yes --> BL2 --> BL4
+        BL1 -- No --> BL3 --> BL4
+        BL4 --> BL5 --> BLS
+    end
+
+    subgraph PR[Proposed (stacked lane)]
+        direction LR
+        PR0[Input: context vector]
+        PR1[LinUCB scoring + exploration]
+        PR2{Action A / B / C}
+        PR3A[A: AI Answers]
+        PR3B[B: Escalate to Human]
+        PR3C[C: Request Diagnostic]
+        PR4[Cost model:<br/>A = loss + 0.0<br/>B = loss + 0.8<br/>C = loss + 0.4]
+        PR5[Fairness loop every 500 steps:<br/>if Delta_EO > 0.05, increase AI penalty<br/>for disadvantaged gender]
+        PRS[Summary:<br/>coverage, escalation rate, diagnostic rate,<br/>average loss, average total cost,<br/>fairness metrics + guardrail history]
+
+        PR0 --> PR1 --> PR2
+        PR2 --> PR3A --> PR4
+        PR2 --> PR3B --> PR4
+        PR2 --> PR3C --> PR4
+        PR4 --> PR5 --> PRS
+    end
+
+    LOSS -. applies to .-> BL4
+    LOSS -. applies to .-> PR4

@@ -1,0 +1,54 @@
+flowchart TB
+    S([Start])
+
+    subgraph DATA[Data]
+        direction LR
+        D1[Load raw ASSISTments data]
+        D2[Preprocess records]
+        D3[Create deterministic synthetic gender]
+        D4[Save processed dataset]
+        D1 --> D2 --> D3 --> D4
+    end
+
+    subgraph MODEL[Model]
+        direction LR
+        M1[Build KT features]
+        M2[Train RandomForest]
+        M3[Calibrate with Platt scaling]
+        M4[Generate p(correct) and confidence]
+        M1 --> M2 --> M3 --> M4
+    end
+
+    subgraph POLICIES[Policies]
+        direction LR
+        C0[Cost logic:<br/>A = loss + 0.0<br/>B = loss + 0.8<br/>C = loss + 0.4<br/>loss = 1 if wrong else 0]
+        P1[Run baseline policy<br/>(confidence thresholding)]
+        P2[Run proposed policy<br/>(LinUCB + fairness guardrail)]
+        C0 -. used by .-> P1
+        C0 -. used by .-> P2
+    end
+
+    subgraph EVAL[Evaluation]
+        direction LR
+        E1[Compute deployment metrics]
+        E2[Compute fairness metrics]
+        E3[Create risk-coverage curves]
+        E4[Generate SHAP global and local explanations]
+        E1 --> E2 --> E3 --> E4
+    end
+
+    subgraph REPORT[Reporting]
+        direction LR
+        R1[Save CSV/JSON logs and tables]
+        R2[Save PNG plots]
+        R3[Update NeurIPS paper inputs]
+        R4[Produce final artifacts in results/ and paper/]
+        R1 --> R2 --> R3 --> R4
+    end
+
+    S --> DATA --> MODEL
+    MODEL --> P1
+    MODEL --> P2
+    P1 --> E1
+    P2 --> E1
+    EVAL --> REPORT --> F([End])

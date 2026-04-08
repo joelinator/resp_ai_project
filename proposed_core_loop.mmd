@@ -1,0 +1,34 @@
+flowchart TB
+    S([Start])
+    E([End])
+
+    subgraph INIT[Initialization]
+        direction LR
+        I1[Load processed data]
+        I2[Build KT features]
+        I3[Train calibrated KT model]
+        I4[Initialize LinUCB]
+        I1 --> I2 --> I3 --> I4
+    end
+
+    subgraph LOOP[Per-interaction loop]
+        direction LR
+        C1[Build context]
+        C2[LinUCB selects A/B/C]
+        C3[Execute action]
+        C4[loss = 1 if wrong else 0]
+        C5[Apply cost:<br/>A:+0.0 B:+0.8 C:+0.4]
+        C6[total_cost = loss + action_cost]
+        C7[reward = - total_cost]
+        C8[Update LinUCB]
+        C9[Log action/loss/cost]
+        N{More interactions?}
+
+        C1 --> C2 --> C3 --> C4 --> C5 --> C6 --> C7 --> C8 --> C9 --> N
+    end
+
+    OUT[Outputs:<br/>coverage, escalation, diagnostic rate,<br/>avg loss, avg total cost]
+
+    S --> INIT --> C1
+    N -- Yes --> C1
+    N -- No --> OUT --> E
